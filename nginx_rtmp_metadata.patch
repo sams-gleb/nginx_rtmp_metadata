@@ -1,0 +1,123 @@
+ngx_rtmp_record_module.c
+
+index e54a30b..8d21ecc 100644
+--- a/ngx_rtmp_record_module.c
++++ b/usr/src/nginx-rtmp-module-master/ngx_rtmp_record_module.c
+@@ -921,23 +921,18 @@ ngx_rtmp_record_write_frame(ngx_rtmp_session_t *s,
+ 
+     tag_size = (ph - hdr) + h->mlen;
+ 
+-    if (ngx_write_file(&rctx->file, hdr, ph - hdr, rctx->file.offset)
++    //write metadata
++    if (h->type != NGX_RTMP_MSG_AMF_META) {
++      if (ngx_write_file(&rctx->file, hdr, ph - hdr, rctx->file.offset)
+         == NGX_ERROR)
+-    {
++      {
+         ngx_rtmp_record_notify_error(s, rctx);
+ 
+         ngx_close_file(rctx->file.fd);
+ 
+         return NGX_ERROR;
+-    }
+-
+-    /* write tag body
+-     * FIXME: NGINX
+-     * ngx_write_chain seems to fit best
+-     * but it suffers from uncontrollable
+-     * allocations.
+-     * we're left with plain writing */
+-    for(; in; in = in->next) {
++      }
++      for(; in; in = in->next) {
+         if (in->buf->pos == in->buf->last) {
+             continue;
+         }
+@@ -948,8 +943,50 @@ ngx_rtmp_record_write_frame(ngx_rtmp_session_t *s,
+         {
+             return NGX_ERROR;
+         }
++      }
+     }
++    else
++    {
++  u_char *l = in->buf->pos;
++
++        while ( *l != 0x02) {
++                h->mlen = h->mlen - 1;
++                l = l + 1;
++        }
++        ph = hdr;
++        *ph++ = (u_char)h->type;
++        p = (u_char*)&h->mlen;
++        *ph++ = p[2];
++        *ph++ = p[1];
++        *ph++ = p[0];
++        p = (u_char*)&timestamp;
++        *ph++ = p[2];
++        *ph++ = p[1];
++        *ph++ = p[0];
++        *ph++ = p[3];
++        *ph++ = 0;
++        *ph++ = 0;
++        *ph++ = 0;
++        tag_size = (ph - hdr) + h->mlen;
++        if (ngx_write_file(&rctx->file, hdr, ph - hdr, rctx->file.offset)
++           == NGX_ERROR)
++        {
++           ngx_rtmp_record_notify_error(s, rctx);
++           ngx_close_file(rctx->file.fd);
++           return NGX_ERROR;
++        }
+ 
++        for(; in; in = in->next) {
++          if (l == in->buf->last) {
++            continue;
++          }
++          if (ngx_write_file(&rctx->file, l, in->buf->last - l, rctx->file.offset) == NGX_ERROR)
++          {
++            return NGX_ERROR;
++          }
++        }
++        //free(l);
++    }
+     /* write tag size */
+     ph = hdr;
+     p = (u_char*)&tag_size;
+@@ -1103,6 +1140,20 @@ ngx_rtmp_record_node_av(ngx_rtmp_session_t *s, ngx_rtmp_record_rec_ctx_t *rctx,
+     if (codec_ctx) {
+         ch = *h;
+ 
++  /* metadata */
++        if (!rctx->meta_sent && codec_ctx->meta) {
++
++               ch.type = NGX_RTMP_MSG_AMF_META;
++               ch.mlen = ngx_rtmp_record_get_chain_mlen(codec_ctx->meta);
++
++               if (ngx_rtmp_record_write_frame(s, rctx, &ch, codec_ctx->meta, 0)
++                        != NGX_OK)
++               {
++                    return NGX_OK;
++               }
++               rctx->meta_sent = 1;
++        }
++
+         /* AAC header */
+         if (!rctx->aac_header_sent && codec_ctx->aac_header &&
+            (rracf->flags & NGX_RTMP_RECORD_AUDIO))
+
+
+
+ngx_rtmp_record_module.h
+
+index 6450dcb..3cb2ff9 100644
+--- a/ngx_rtmp_record_module.h
++++ b/usr/src/nginx-rtmp-module-master/ngx_rtmp_record_module.h
+@@ -51,6 +51,7 @@ typedef struct {
+     unsigned                            aac_header_sent:1;
+     unsigned                            avc_header_sent:1;
+     unsigned                            video_key_sent:1;
++    unsigned                            meta_sent:1;
+     unsigned                            audio:1;
+     unsigned                            video:1;
+ } ngx_rtmp_record_rec_ctx_t;
